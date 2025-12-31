@@ -1,15 +1,19 @@
-const Clutter = imports.gi.Clutter;
-const Gio = imports.gi.Gio;
-const GObject = imports.gi.GObject;
-const St = imports.gi.St;
-const Util = imports.misc.util;
-const ByteArray = imports.byteArray;
+import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
+import GObject from 'gi://GObject';
+import St from 'gi://St';
 
-const Dialog = imports.ui.dialog;
-const Main = imports.ui.main;
-const ModalDialog = imports.ui.modalDialog;
-const PopupMenu = imports.ui.popupMenu;
-const Ornament = imports.ui.popupMenu.Ornament;
+import * as Util from 'resource:///org/gnome/shell/misc/util.js';
+
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as Dialog from 'resource:///org/gnome/shell/ui/dialog.js';
+import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import { Ornament } from 'resource:///org/gnome/shell/ui/popupMenu.js';
+
+const ByteArray = imports.byteArray;
+const Lang = imports.lang;
 
 const PowerDaemon = Gio.DBusProxy.makeProxyWrapper(
 '<node>\
@@ -62,35 +66,34 @@ let PRODUCT_VERSION = "";
 let ext: Ext | null = null;
 
 function log(text: string) {
-    global.log("gnome-shell-extension-system76-power: " + text);
+    (globalThis as any).log("gnome-shell-extension-system76-power: " + text);
 }
 
-// @ts-ignore
-function init() {
-    let file = Gio.File.new_for_path(DMI_PRODUCT_VERSION_PATH);
-    let [, contents] = file.load_contents(null);
-    PRODUCT_VERSION = ByteArray.toString(contents).trim();
-}
-
-// @ts-ignore
-function enable() {
-    if (null === ext) {
-        // Remove power profiles menu
-        const menu = Main.panel.statusArea['aggregateMenu']
-        const powerProfilesMenu = menu._powerProfiles
-        if (powerProfilesMenu) {
-            menu._indicators.remove_child(powerProfilesMenu)
-            menu.menu.box.remove_child(powerProfilesMenu.menu.actor)
-        }
-
-        ext = new Ext();
+export default class System76PowerExtension {
+    init() {
+        let file = Gio.File.new_for_path(DMI_PRODUCT_VERSION_PATH);
+        let [, contents] = file.load_contents(null);
+        PRODUCT_VERSION = ByteArray.toString(contents).trim();
     }
-}
 
-// @ts-ignore
-function disable() {
-    if (ext) ext.destroy();
-    ext = null;
+    enable() {
+        if (null === ext) {
+            // Remove power profiles menu
+            const menu = Main.panel.statusArea['aggregateMenu']
+            const powerProfilesMenu = menu._powerProfiles
+            if (powerProfilesMenu) {
+                menu._indicators.remove_child(powerProfilesMenu)
+                menu.menu.box.remove_child(powerProfilesMenu.menu.actor)
+            }
+
+            ext = new Ext();
+        }
+    }
+
+    disable() {
+        if (ext) ext.destroy();
+        ext = null;
+    }
 }
 
 var PopDialog = GObject.registerClass(
@@ -100,7 +103,7 @@ var PopDialog = GObject.registerClass(
 
             // NOTE: Icons were removed in 3.36
             this._content = new Dialog.MessageDialogContent({ title, description });
-            this.contentLayout.add(this._content);
+            this.contentLayout.add_child(this._content);
         }
     }
 );
@@ -127,9 +130,9 @@ var PopupGraphicsMenuItem = GObject.registerClass(
                 this.description.hide();
             }
 
-            this.box.add(this.label);
-            this.box.add(this.description);
-            this.actor.add(this.box);
+            this.box.add_child(this.label);
+            this.box.add_child(this.description);
+            this.actor.add_child(this.box);
             this.actor.label_actor = this.box;
         }
     }
@@ -146,6 +149,52 @@ interface GraphicsProfiles {
     compute: GObj;
 }
 
+var PanelIndicator = GObject.registerClass(
+    class PanelIndicator extends PanelMenu.Button {
+      _init() {
+        super._init(0.0, "S76Panel", false);
+
+        this.add_style_class_name('panel-status-button');
+
+        this._indicatorLayout = new St.BoxLayout({
+            vertical: false,
+            reactive: true,
+            can_focus: true,
+            track_hover: true
+        });
+
+        this._binProfile = new St.Bin({ 
+            reactive: true,
+            can_focus: true,
+            track_hover: true
+        });
+
+        this._iconProfile = new St.Icon({
+            icon_name: 'gnome-power-manager-symbolic',
+            style_class: 'system-status-icon'
+        });
+
+        this._binProfile.add_child(this._iconProfile);
+
+        this._indicatorLayout.add_child(this._binProfile);
+
+        // add indicator to panel icon
+        this.add_child(this._indicatorLayout);
+
+        this.menu.connect('open-state-changed', Lang.bind(this._indicatorLayout, (_: any, open: boolean) => {
+            if (open)
+                this._indicatorLayout.add_style_pseudo_class('active');
+            else
+                this._indicatorLayout.remove_style_pseudo_class('active');
+
+        }));
+
+        Main.panel.addToStatusArea('s76-power.panel', this);
+      }
+
+    }
+);
+
 export class Ext {
     bus: GObj = new PowerDaemon(Gio.DBus.system, 'com.system76.PowerDaemon', '/com/system76/PowerDaemon');
 
@@ -155,7 +204,9 @@ export class Ext {
 
     graphics_profiles: GraphicsProfiles | null = null;
 
-    power_menu: GObj = Main.panel.statusArea['aggregateMenu']._power._item.menu;
+    // power_menu: GObj = Main.panel.statusArea['aggregateMenu']._power._item.menu;
+    panel_indicator = new PanelIndicator();
+    power_menu = this.panel_indicator.menu;
     graphics_separator: GObj = new PopupMenu.PopupSeparatorMenuItem();
     profile_separator: GObj = new PopupMenu.PopupSeparatorMenuItem();
 
@@ -275,6 +326,7 @@ export class Ext {
             this.graphics_profiles.integrated.destroy();
             this.graphics_profiles.nvidia.destroy();
         }
+        this.panel_indicator.destroy();
     }
 
     attach_graphics_profile(name: string, text: string | null, profile: string) {
@@ -292,7 +344,7 @@ export class Ext {
         obj.connect('activate', (item: any) => {
             this.reset_profile_ornament();
             dbus_method.call(this.bus, () => {
-                item.setOrnament(Ornament.DOT);
+                item.setOrnament(Ornament.CHECK);
             });
         });
         this.power_menu.addMenuItem(obj);
@@ -313,7 +365,7 @@ export class Ext {
             obj = graphics_profiles.nvidia;
         }
 
-        obj.setOrnament(Ornament.DOT);
+        obj.setOrnament(Ornament.CHECK);
     }
 
     set_power_profile_ornament(active_profile: string) {
@@ -328,7 +380,7 @@ export class Ext {
             obj = this.performance;
         }
 
-        if (obj) obj.setOrnament(Ornament.DOT);
+        if (obj) obj.setOrnament(Ornament.CHECK);
 
         log("power profile was set: '" + active_profile + "'");
     }
