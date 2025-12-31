@@ -9,10 +9,26 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Dialog from 'resource:///org/gnome/shell/ui/dialog.js';
 import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import { Ornament } from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
 const ByteArray = imports.byteArray;
+const Lang = imports.lang;
+const Config = imports.misc.config;
+
+// Detect GNOME Shell version
+const shellVersion = parseFloat(Config.PACKAGE_VERSION);
+const useQuickSettings = shellVersion >= 45;
+
+// Conditionally import QuickSettings for GNOME 45+
+let QuickSettings: any = null;
+if (useQuickSettings) {
+    try {
+        QuickSettings = imports.ui.quickSettings;
+    } catch (e) {
+        log("QuickSettings not available, falling back to PanelIndicator");
+    }
+}
 
 const PowerDaemon = Gio.DBusProxy.makeProxyWrapper(
 '<node>\
@@ -140,32 +156,87 @@ interface GraphicsProfiles {
     compute: GObj;
 }
 
-var GraphicsQuickMenuToggle = GObject.registerClass(
-    class GraphicsQuickMenuToggle extends QuickSettings.QuickMenuToggle {
-        _init() {
-            super._init({
-                title: _("Graphics"),
-                iconName: 'video-display-symbolic',
-                toggleMode: false,
-            });
+// Panel indicator for GNOME 43-44
+var PanelIndicator = GObject.registerClass(
+    class PanelIndicator extends PanelMenu.Button {
+      _init() {
+        super._init(0.0, "S76Panel", false);
 
-            this.menu.setHeader('video-display-symbolic', _("Graphics Mode"));
-        }
+        this.add_style_class_name('panel-status-button');
 
-        setActiveProfile(profileName: string) {
-            this.subtitle = profileName;
-        }
+        this._indicatorLayout = new St.BoxLayout({
+            vertical: false,
+            reactive: true,
+            can_focus: true,
+            track_hover: true
+        });
+
+        this._binProfile = new St.Bin({ 
+            reactive: true,
+            can_focus: true,
+            track_hover: true
+        });
+
+        this._iconProfile = new St.Icon({
+            icon_name: 'video-display-symbolic',
+            style_class: 'system-status-icon'
+        });
+
+        this._binProfile.add_child(this._iconProfile);
+
+        this._indicatorLayout.add_child(this._binProfile);
+
+        // add indicator to panel icon
+        this.add_child(this._indicatorLayout);
+
+        this.menu.connect('open-state-changed', Lang.bind(this._indicatorLayout, (_: any, open: boolean) => {
+            if (open)
+                this._indicatorLayout.add_style_pseudo_class('active');
+            else
+                this._indicatorLayout.remove_style_pseudo_class('active');
+
+        }));
+
+        Main.panel.addToStatusArea('s76-power.panel', this);
+      }
     }
 );
+
+// Quick Settings toggle for GNOME 45+
+var GraphicsQuickMenuToggle: any = null;
+if (useQuickSettings && QuickSettings) {
+    GraphicsQuickMenuToggle = GObject.registerClass(
+        class GraphicsQuickMenuToggle extends QuickSettings.QuickMenuToggle {
+            _init() {
+                super._init({
+                    title: _("Graphics"),
+                    iconName: 'video-display-symbolic',
+                    toggleMode: false,
+                });
+
+                this.menu.setHeader('video-display-symbolic', _("Graphics Mode"));
+            }
+
+            setActiveProfile(profileName: string) {
+                this.subtitle = profileName;
+            }
+        }
+    );
+}
 
 export class Ext {
     bus: GObj = new PowerDaemon(Gio.DBus.system, 'com.system76.PowerDaemon', '/com/system76/PowerDaemon');
 
     graphics_profiles: GraphicsProfiles | null = null;
 
+    // For GNOME 45+ Quick Settings
     quickSettingsMenu: any = null;
     graphics_toggle: any = null;
-    graphics_indicator: any = null;
+    
+    // For GNOME 43-44 Panel Indicator
+    panel_indicator: any = null;
+    power_menu: any = null;
+    graphics_separator: GObj | null = null;
 
     switched: boolean = false;
     notified: boolean = false;
@@ -178,8 +249,17 @@ export class Ext {
                 let ext_requires_nvidia: boolean = this.bus.GetExternalDisplaysRequireDgpuSync() == "true";
                 let graphics: string = this.bus.GetGraphicsSync();
 
-                // Create Quick Settings menu toggle for graphics
-                this.graphics_toggle = new GraphicsQuickMenuToggle();
+                // Create UI based on GNOME Shell version
+                if (useQuickSettings && GraphicsQuickMenuToggle) {
+                    // GNOME 45+: Use Quick Settings
+                    this.graphics_toggle = new GraphicsQuickMenuToggle();
+                } else {
+                    // GNOME 43-44: Use Panel Indicator
+                    this.panel_indicator = new PanelIndicator();
+                    this.power_menu = this.panel_indicator.menu;
+                    this.graphics_separator = new PopupMenu.PopupSeparatorMenuItem();
+                    this.power_menu.addMenuItem(this.graphics_separator);
+                }
                 
                 let compute_text: string | null = null,
                     hybrid_text: string | null = null,
@@ -231,13 +311,14 @@ export class Ext {
 
                 this.set_graphics_profile_ornament(this.graphics_profiles, graphics);
                 
-                // Update the toggle subtitle with current profile
-                let profileName = graphics.charAt(0).toUpperCase() + graphics.slice(1);
-                this.graphics_toggle.setActiveProfile(profileName);
-
-                // Add to Quick Settings
-                this.quickSettingsMenu = Main.panel.statusArea.quickSettings;
-                this.quickSettingsMenu.addExternalIndicator(this.graphics_toggle);
+                // For GNOME 45+, update the toggle subtitle and add to Quick Settings
+                if (useQuickSettings && this.graphics_toggle) {
+                    let profileName = graphics.charAt(0).toUpperCase() + graphics.slice(1);
+                    this.graphics_toggle.setActiveProfile(profileName);
+                    
+                    this.quickSettingsMenu = Main.panel.statusArea.quickSettings;
+                    this.quickSettingsMenu.addExternalIndicator(this.graphics_toggle);
+                }
 
                 this.bus.connectSignal("HotPlugDetect", (proxy: any, _nameOwner: any, args: any) => {
                     if (this.graphics_profiles) {
@@ -278,12 +359,21 @@ export class Ext {
             this.graphics_profiles.nvidia.destroy();
         }
 
+        // Cleanup for GNOME 45+ Quick Settings
         if (this.graphics_toggle) {
-            // Remove from indicators in the panel
             if (this.graphics_toggle.get_parent())
                 this.graphics_toggle.get_parent().remove_child(this.graphics_toggle);
             
             this.graphics_toggle.destroy();
+        }
+
+        // Cleanup for GNOME 43-44 Panel Indicator
+        if (this.panel_indicator) {
+            this.panel_indicator.destroy();
+        }
+        
+        if (this.graphics_separator) {
+            this.graphics_separator.destroy();
         }
     }
 
@@ -293,7 +383,14 @@ export class Ext {
         obj.connect('activate', (item: any) => {
             this.graphics_activate(item, name, profile);
         });
-        this.graphics_toggle.menu.addMenuItem(obj);
+        
+        // Add to appropriate menu based on GNOME version
+        if (useQuickSettings && this.graphics_toggle) {
+            this.graphics_toggle.menu.addMenuItem(obj);
+        } else if (this.power_menu) {
+            this.power_menu.addMenuItem(obj);
+        }
+        
         return obj;
     }
 
