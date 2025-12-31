@@ -20,7 +20,7 @@ clean:
 	rm -rf _build
 
 transpile: $(sources)
-	tsc
+	npx tsc
 
 compile: convert metadata.json
 	rm -rf _build

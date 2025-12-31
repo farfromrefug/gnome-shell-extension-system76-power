@@ -1,7 +1,7 @@
 {
     "name": "System76 Power",
-    "description": "System76 Power Management",
+    "description": "System76 Power Management with graphics switching",
     "uuid": "system76-power@system76.com",
-    "shell-version": ["45", "46", "47", "48"],
+    "shell-version": ["43", "44", "45", "46", "47", "48"],
     "url": "https://github.com/pop-os/gnome-shell-extension-system76-power"
 }

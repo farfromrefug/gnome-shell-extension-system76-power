@@ -4,6 +4,7 @@ import GObject from 'gi://GObject';
 import St from 'gi://St';
 
 import * as Util from 'resource:///org/gnome/shell/misc/util.js';
+import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Dialog from 'resource:///org/gnome/shell/ui/dialog.js';
@@ -11,9 +12,21 @@ import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import { Ornament } from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const ByteArray = imports.byteArray;
-const Lang = imports.lang;
+// Detect GNOME Shell version - parse major version only
+const shellVersionParts = Config.PACKAGE_VERSION.split('.');
+const shellMajorVersion = parseInt(shellVersionParts[0], 10);
+const useQuickSettings = shellMajorVersion >= 45;
+
+// Conditionally import QuickSettings for GNOME 45+
+let QuickSettings: any = null;
+if (useQuickSettings) {
+    QuickSettings = await import('resource:///org/gnome/shell/ui/quickSettings.js');
+}
+
+// Determine if we can actually use Quick Settings (both version check and import succeeded)
+const canUseQuickSettings = useQuickSettings && QuickSettings !== null;
 
 const PowerDaemon = Gio.DBusProxy.makeProxyWrapper(
 '<node>\
@@ -28,6 +41,9 @@ const PowerDaemon = Gio.DBusProxy.makeProxyWrapper(
       <arg name="required" type="b" direction="out"/>\
     </method>\
     <method name="GetGraphics">\
+      <arg name="vendor" type="s" direction="out"/>\
+    </method>\
+    <method name="GetGraphicsSync">\
       <arg name="vendor" type="s" direction="out"/>\
     </method>\
     <method name="SetGraphics">\
@@ -69,23 +85,19 @@ function log(text: string) {
     (globalThis as any).log("gnome-shell-extension-system76-power: " + text);
 }
 
-export default class System76PowerExtension {
-    init() {
-        let file = Gio.File.new_for_path(DMI_PRODUCT_VERSION_PATH);
-        let [, contents] = file.load_contents(null);
-        PRODUCT_VERSION = ByteArray.toString(contents).trim();
-    }
-
+export default class System76PowerExtension extends Extension {
     enable() {
         if (null === ext) {
-            // Remove power profiles menu
-            const menu = Main.panel.statusArea['aggregateMenu']
-            const powerProfilesMenu = menu._powerProfiles
-            if (powerProfilesMenu) {
-                menu._indicators.remove_child(powerProfilesMenu)
-                menu.menu.box.remove_child(powerProfilesMenu.menu.actor)
+            try {
+                let file = Gio.File.new_for_path(DMI_PRODUCT_VERSION_PATH);
+                let [, contents] = file.load_contents(null);
+                // Convert Uint8Array to string
+                PRODUCT_VERSION = String.fromCharCode(...contents).trim();
+            } catch (e) {
+                log('Failed to read product version: ' + e);
+                PRODUCT_VERSION = '';
             }
-
+            
             ext = new Ext();
         }
     }
@@ -149,6 +161,7 @@ interface GraphicsProfiles {
     compute: GObj;
 }
 
+// Panel indicator for GNOME 43-44
 var PanelIndicator = GObject.registerClass(
     class PanelIndicator extends PanelMenu.Button {
       _init() {
@@ -170,7 +183,7 @@ var PanelIndicator = GObject.registerClass(
         });
 
         this._iconProfile = new St.Icon({
-            icon_name: 'gnome-power-manager-symbolic',
+            icon_name: 'video-display-symbolic',
             style_class: 'system-status-icon'
         });
 
@@ -181,34 +194,85 @@ var PanelIndicator = GObject.registerClass(
         // add indicator to panel icon
         this.add_child(this._indicatorLayout);
 
-        this.menu.connect('open-state-changed', Lang.bind(this._indicatorLayout, (_: any, open: boolean) => {
+        this.menu.connect('open-state-changed', (_: any, open: boolean) => {
             if (open)
                 this._indicatorLayout.add_style_pseudo_class('active');
             else
                 this._indicatorLayout.remove_style_pseudo_class('active');
-
-        }));
+        });
 
         Main.panel.addToStatusArea('s76-power.panel', this);
       }
-
     }
 );
+
+// Quick Settings toggle for GNOME 45+
+var System76GraphicsQuickMenuToggle: typeof QuickSettings.QuickMenuToggle = null;
+let ServiceIndicator: typeof QuickSettings.SystemIndicator = null;
+if (canUseQuickSettings) {
+    const QuickSettingsMenu = Main.panel.statusArea.quickSettings;
+
+    System76GraphicsQuickMenuToggle = GObject.registerClass({
+    GTypeName: 'System76GraphicsQuickMenuToggle',
+}, class ServiceToggle extends QuickSettings.QuickMenuToggle {
+            _init() {
+                super._init({
+                    title: _("Graphics"),
+                    iconName: 'video-display-symbolic',
+                    toggleMode: false,
+                });
+
+                this.menu.setHeader('video-display-symbolic', _("Graphics Mode"));
+            }
+
+            setActiveProfile(profileName: string) {
+                this.subtitle = profileName;
+            }
+        }
+    );
+
+ ServiceIndicator = GObject.registerClass(
+class ServiceIndicator extends QuickSettings.SystemIndicator {
+    _init() {
+        super._init();
+
+        // Create the icon for the indicator
+        this._indicator = this._addIndicator();
+        this._indicator.icon_name = 'video-display-symbolic';
+        // Hide the indicator by default
+        this._indicator.visible = false;
+        this.graphic_toggle = new System76GraphicsQuickMenuToggle()
+        // Create the toggle menu and associate it with the indicator
+        this.quickSettingsItems.push(this.graphic_toggle);
+
+        // Add the indicator to the panel and the toggle to the menu
+        QuickSettingsMenu.addExternalIndicator(this);
+    }
+
+    destroy() {
+        // Set enabled state to false to kill the service on destroy
+        this.quickSettingsItems.forEach(item => item.destroy());
+        // Destroy the indicator
+        this._indicator.destroy();
+        super.destroy();
+    }
+});
+}
 
 export class Ext {
     bus: GObj = new PowerDaemon(Gio.DBus.system, 'com.system76.PowerDaemon', '/com/system76/PowerDaemon');
 
-    battery: GObj;
-    balanced: GObj;
-    performance: GObj;
-
     graphics_profiles: GraphicsProfiles | null = null;
 
-    // power_menu: GObj = Main.panel.statusArea['aggregateMenu']._power._item.menu;
-    panel_indicator = new PanelIndicator();
-    power_menu = this.panel_indicator.menu;
-    graphics_separator: GObj = new PopupMenu.PopupSeparatorMenuItem();
-    profile_separator: GObj = new PopupMenu.PopupSeparatorMenuItem();
+    // For GNOME 45+ Quick Settings
+    quickSettingsMenu: any = null;
+    graphics_toggle: typeof System76GraphicsQuickMenuToggle = null;
+    service_indicator: typeof ServiceIndicator = null;
+    
+    // For GNOME 43-44 Panel Indicator
+    panel_indicator: any = null;
+    power_menu: any = null;
+    graphics_separator: GObj | null = null;
 
     switched: boolean = false;
     notified: boolean = false;
@@ -221,8 +285,20 @@ export class Ext {
                 let ext_requires_nvidia: boolean = this.bus.GetExternalDisplaysRequireDgpuSync() == "true";
                 let graphics: string = this.bus.GetGraphicsSync();
 
-                this.power_menu.addMenuItem(this.graphics_separator);
 
+                // Create UI based on GNOME Shell version
+                if (canUseQuickSettings) {
+                    // GNOME 45+: Use Quick Settings
+                    this.service_indicator = new ServiceIndicator();
+                    this.graphics_toggle = this.service_indicator.graphic_toggle;
+                } else {
+                    // GNOME 43-44: Use Panel Indicator
+                    this.panel_indicator = new PanelIndicator();
+                    this.power_menu = this.panel_indicator.menu;
+                    this.graphics_separator = new PopupMenu.PopupSeparatorMenuItem();
+                    this.power_menu.addMenuItem(this.graphics_separator);
+                }
+                
                 let compute_text: string | null = null,
                     hybrid_text: string | null = null,
                     integrated_text: string | null = null,
@@ -272,7 +348,7 @@ export class Ext {
                 };
 
                 this.set_graphics_profile_ornament(this.graphics_profiles, graphics);
-
+                
                 this.bus.connectSignal("HotPlugDetect", (proxy: any, _nameOwner: any, args: any) => {
                     if (this.graphics_profiles) {
                         log("hotplug event detected");
@@ -302,31 +378,30 @@ export class Ext {
         } catch (error) {
             log("failed to detect graphics switching: " + error);
         }
-
-        this.power_menu.addMenuItem(this.profile_separator);
-
-        this.battery = this.attach_power_profile(_("Battery Life"), this.bus.BatteryRemote);
-        this.balanced = this.attach_power_profile(_("Balanced"), this.bus.BalancedRemote);
-        this.performance = this.attach_power_profile(_("High Performance"), this.bus.PerformanceRemote);
-
-        this.set_power_profile_ornament(this.bus.GetProfileSync());
-        this.bus.connectSignal("PowerProfileSwitch", (_proxy: any, _sender: any, [profile]: string[]) => {
-            this.set_power_profile_ornament(profile);
-        });
     }
 
     destroy() {
-        this.battery.destroy();
-        this.balanced.destroy();
-        this.performance.destroy();
-
         if (this.graphics_profiles) {
             this.graphics_profiles.compute.destroy();
             this.graphics_profiles.hybrid.destroy();
             this.graphics_profiles.integrated.destroy();
             this.graphics_profiles.nvidia.destroy();
         }
-        this.panel_indicator.destroy();
+
+        // Cleanup for GNOME 45+ Quick Settings
+        if (this.graphics_toggle) {
+            this.graphics_toggle.destroy();
+            this.graphics_toggle = null;
+        }
+
+        // Cleanup for GNOME 43-44 Panel Indicator
+        if (this.panel_indicator) {
+            this.panel_indicator.destroy();
+        }
+        
+        if (this.graphics_separator) {
+            this.graphics_separator.destroy();
+        }
     }
 
     attach_graphics_profile(name: string, text: string | null, profile: string) {
@@ -335,19 +410,14 @@ export class Ext {
         obj.connect('activate', (item: any) => {
             this.graphics_activate(item, name, profile);
         });
-        this.power_menu.addMenuItem(obj);
-        return obj;
-    }
-
-    attach_power_profile(name: string, dbus_method: any): any {
-        let obj = new PopupMenu.PopupMenuItem(name);
-        obj.connect('activate', (item: any) => {
-            this.reset_profile_ornament();
-            dbus_method.call(this.bus, () => {
-                item.setOrnament(Ornament.CHECK);
-            });
-        });
-        this.power_menu.addMenuItem(obj);
+        
+        // Add to appropriate menu based on GNOME version
+        if (canUseQuickSettings && this.graphics_toggle) {
+            this.graphics_toggle.menu.addMenuItem(obj);
+        } else if (this.power_menu) {
+            this.power_menu.addMenuItem(obj);
+        }
+        
         return obj;
     }
 
@@ -366,23 +436,6 @@ export class Ext {
         }
 
         obj.setOrnament(Ornament.CHECK);
-    }
-
-    set_power_profile_ornament(active_profile: string) {
-        this.reset_profile_ornament();
-
-        let obj = null;
-        if (active_profile == "Battery") {
-            obj = this.battery;
-        } else if (active_profile == "Balanced") {
-            obj = this.balanced;
-        } else if (active_profile == "Performance") {
-            obj = this.performance;
-        }
-
-        if (obj) obj.setOrnament(Ornament.CHECK);
-
-        log("power profile was set: '" + active_profile + "'");
     }
 
     /** Display dialog on hotplug event. */
@@ -525,12 +578,6 @@ export class Ext {
         graphics_profiles.hybrid.setOrnament(Ornament.NONE);
         graphics_profiles.integrated.setOrnament(Ornament.NONE);
         graphics_profiles.nvidia.setOrnament(Ornament.NONE);
-    }
-
-    reset_profile_ornament() {
-        this.performance.setOrnament(Ornament.NONE);
-        this.balanced.setOrnament(Ornament.NONE);
-        this.battery.setOrnament(Ornament.NONE);
     }
 }
 
