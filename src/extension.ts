@@ -4,6 +4,7 @@ import GObject from 'gi://GObject';
 import St from 'gi://St';
 
 import * as Util from 'resource:///org/gnome/shell/misc/util.js';
+import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Dialog from 'resource:///org/gnome/shell/ui/dialog.js';
@@ -11,9 +12,7 @@ import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import { Ornament } from 'resource:///org/gnome/shell/ui/popupMenu.js';
-
-const ByteArray = imports.byteArray;
-const Config = imports.misc.config;
+import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // Detect GNOME Shell version - parse major version only
 const shellVersionParts = Config.PACKAGE_VERSION.split('.');
@@ -23,11 +22,7 @@ const useQuickSettings = shellMajorVersion >= 45;
 // Conditionally import QuickSettings for GNOME 45+
 let QuickSettings: any = null;
 if (useQuickSettings) {
-    try {
-        QuickSettings = imports.ui.quickSettings;
-    } catch (e) {
-        log("QuickSettings not available, falling back to PanelIndicator");
-    }
+    QuickSettings = await import('resource:///org/gnome/shell/ui/quickSettings.js');
 }
 
 // Determine if we can actually use Quick Settings (both version check and import succeeded)
@@ -46,6 +41,9 @@ const PowerDaemon = Gio.DBusProxy.makeProxyWrapper(
       <arg name="required" type="b" direction="out"/>\
     </method>\
     <method name="GetGraphics">\
+      <arg name="vendor" type="s" direction="out"/>\
+    </method>\
+    <method name="GetGraphicsSync">\
       <arg name="vendor" type="s" direction="out"/>\
     </method>\
     <method name="SetGraphics">\
@@ -87,15 +85,19 @@ function log(text: string) {
     (globalThis as any).log("gnome-shell-extension-system76-power: " + text);
 }
 
-export default class System76PowerExtension {
-    init() {
-        let file = Gio.File.new_for_path(DMI_PRODUCT_VERSION_PATH);
-        let [, contents] = file.load_contents(null);
-        PRODUCT_VERSION = ByteArray.toString(contents).trim();
-    }
-
+export default class System76PowerExtension extends Extension {
     enable() {
         if (null === ext) {
+            try {
+                let file = Gio.File.new_for_path(DMI_PRODUCT_VERSION_PATH);
+                let [, contents] = file.load_contents(null);
+                // Convert Uint8Array to string
+                PRODUCT_VERSION = String.fromCharCode(...contents).trim();
+            } catch (e) {
+                log('Failed to read product version: ' + e);
+                PRODUCT_VERSION = '';
+            }
+            
             ext = new Ext();
         }
     }
@@ -205,10 +207,14 @@ var PanelIndicator = GObject.registerClass(
 );
 
 // Quick Settings toggle for GNOME 45+
-var GraphicsQuickMenuToggle: any = null;
+var System76GraphicsQuickMenuToggle: typeof QuickSettings.QuickMenuToggle = null;
+let ServiceIndicator: typeof QuickSettings.SystemIndicator = null;
 if (canUseQuickSettings) {
-    GraphicsQuickMenuToggle = GObject.registerClass(
-        class GraphicsQuickMenuToggle extends QuickSettings.QuickMenuToggle {
+    const QuickSettingsMenu = Main.panel.statusArea.quickSettings;
+
+    System76GraphicsQuickMenuToggle = GObject.registerClass({
+    GTypeName: 'System76GraphicsQuickMenuToggle',
+}, class ServiceToggle extends QuickSettings.QuickMenuToggle {
             _init() {
                 super._init({
                     title: _("Graphics"),
@@ -224,6 +230,33 @@ if (canUseQuickSettings) {
             }
         }
     );
+
+ ServiceIndicator = GObject.registerClass(
+class ServiceIndicator extends QuickSettings.SystemIndicator {
+    _init() {
+        super._init();
+
+        // Create the icon for the indicator
+        this._indicator = this._addIndicator();
+        this._indicator.icon_name = 'video-display-symbolic';
+        // Hide the indicator by default
+        this._indicator.visible = false;
+        this.graphic_toggle = new System76GraphicsQuickMenuToggle()
+        // Create the toggle menu and associate it with the indicator
+        this.quickSettingsItems.push(this.graphic_toggle);
+
+        // Add the indicator to the panel and the toggle to the menu
+        QuickSettingsMenu.addExternalIndicator(this);
+    }
+
+    destroy() {
+        // Set enabled state to false to kill the service on destroy
+        this.quickSettingsItems.forEach(item => item.destroy());
+        // Destroy the indicator
+        this._indicator.destroy();
+        super.destroy();
+    }
+});
 }
 
 export class Ext {
@@ -233,7 +266,8 @@ export class Ext {
 
     // For GNOME 45+ Quick Settings
     quickSettingsMenu: any = null;
-    graphics_toggle: any = null;
+    graphics_toggle: typeof System76GraphicsQuickMenuToggle = null;
+    service_indicator: typeof ServiceIndicator = null;
     
     // For GNOME 43-44 Panel Indicator
     panel_indicator: any = null;
@@ -250,11 +284,15 @@ export class Ext {
             if (this.bus.GetSwitchableSync() == "true") {
                 let ext_requires_nvidia: boolean = this.bus.GetExternalDisplaysRequireDgpuSync() == "true";
                 let graphics: string = this.bus.GetGraphicsSync();
+                log("graphics: " + graphics)
+                log("canUseQuickSettings: " + canUseQuickSettings)
+
 
                 // Create UI based on GNOME Shell version
                 if (canUseQuickSettings) {
                     // GNOME 45+: Use Quick Settings
-                    this.graphics_toggle = new GraphicsQuickMenuToggle();
+                    this.service_indicator = new ServiceIndicator();
+                    this.graphics_toggle = this.service_indicator.graphic_toggle;
                 } else {
                     // GNOME 43-44: Use Panel Indicator
                     this.panel_indicator = new PanelIndicator();
@@ -313,15 +351,6 @@ export class Ext {
 
                 this.set_graphics_profile_ornament(this.graphics_profiles, graphics);
                 
-                // For GNOME 45+, update the toggle subtitle and add to Quick Settings
-                if (canUseQuickSettings && this.graphics_toggle) {
-                    let profileName = graphics.charAt(0).toUpperCase() + graphics.slice(1);
-                    this.graphics_toggle.setActiveProfile(profileName);
-                    
-                    this.quickSettingsMenu = Main.panel.statusArea.quickSettings;
-                    this.quickSettingsMenu.addExternalIndicator(this.graphics_toggle);
-                }
-
                 this.bus.connectSignal("HotPlugDetect", (proxy: any, _nameOwner: any, args: any) => {
                     if (this.graphics_profiles) {
                         log("hotplug event detected");
@@ -363,10 +392,8 @@ export class Ext {
 
         // Cleanup for GNOME 45+ Quick Settings
         if (this.graphics_toggle) {
-            if (this.graphics_toggle.get_parent())
-                this.graphics_toggle.get_parent().remove_child(this.graphics_toggle);
-            
             this.graphics_toggle.destroy();
+            this.graphics_toggle = null;
         }
 
         // Cleanup for GNOME 43-44 Panel Indicator
