@@ -9,11 +9,10 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Dialog from 'resource:///org/gnome/shell/ui/dialog.js';
 import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import { Ornament } from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
 const ByteArray = imports.byteArray;
-const Lang = imports.lang;
 
 const PowerDaemon = Gio.DBusProxy.makeProxyWrapper(
 '<node>\
@@ -78,14 +77,6 @@ export default class System76PowerExtension {
 
     enable() {
         if (null === ext) {
-            // Remove power profiles menu
-            const menu = Main.panel.statusArea['aggregateMenu']
-            const powerProfilesMenu = menu._powerProfiles
-            if (powerProfilesMenu) {
-                menu._indicators.remove_child(powerProfilesMenu)
-                menu.menu.box.remove_child(powerProfilesMenu.menu.actor)
-            }
-
             ext = new Ext();
         }
     }
@@ -149,66 +140,32 @@ interface GraphicsProfiles {
     compute: GObj;
 }
 
-var PanelIndicator = GObject.registerClass(
-    class PanelIndicator extends PanelMenu.Button {
-      _init() {
-        super._init(0.0, "S76Panel", false);
+var GraphicsQuickMenuToggle = GObject.registerClass(
+    class GraphicsQuickMenuToggle extends QuickSettings.QuickMenuToggle {
+        _init() {
+            super._init({
+                title: _("Graphics"),
+                iconName: 'video-display-symbolic',
+                toggleMode: false,
+            });
 
-        this.add_style_class_name('panel-status-button');
+            this.menu.setHeader('video-display-symbolic', _("Graphics Mode"));
+        }
 
-        this._indicatorLayout = new St.BoxLayout({
-            vertical: false,
-            reactive: true,
-            can_focus: true,
-            track_hover: true
-        });
-
-        this._binProfile = new St.Bin({ 
-            reactive: true,
-            can_focus: true,
-            track_hover: true
-        });
-
-        this._iconProfile = new St.Icon({
-            icon_name: 'gnome-power-manager-symbolic',
-            style_class: 'system-status-icon'
-        });
-
-        this._binProfile.add_child(this._iconProfile);
-
-        this._indicatorLayout.add_child(this._binProfile);
-
-        // add indicator to panel icon
-        this.add_child(this._indicatorLayout);
-
-        this.menu.connect('open-state-changed', Lang.bind(this._indicatorLayout, (_: any, open: boolean) => {
-            if (open)
-                this._indicatorLayout.add_style_pseudo_class('active');
-            else
-                this._indicatorLayout.remove_style_pseudo_class('active');
-
-        }));
-
-        Main.panel.addToStatusArea('s76-power.panel', this);
-      }
-
+        setActiveProfile(profileName: string) {
+            this.subtitle = profileName;
+        }
     }
 );
 
 export class Ext {
     bus: GObj = new PowerDaemon(Gio.DBus.system, 'com.system76.PowerDaemon', '/com/system76/PowerDaemon');
 
-    battery: GObj;
-    balanced: GObj;
-    performance: GObj;
-
     graphics_profiles: GraphicsProfiles | null = null;
 
-    // power_menu: GObj = Main.panel.statusArea['aggregateMenu']._power._item.menu;
-    panel_indicator = new PanelIndicator();
-    power_menu = this.panel_indicator.menu;
-    graphics_separator: GObj = new PopupMenu.PopupSeparatorMenuItem();
-    profile_separator: GObj = new PopupMenu.PopupSeparatorMenuItem();
+    quickSettingsMenu: any = null;
+    graphics_toggle: any = null;
+    graphics_indicator: any = null;
 
     switched: boolean = false;
     notified: boolean = false;
@@ -221,8 +178,9 @@ export class Ext {
                 let ext_requires_nvidia: boolean = this.bus.GetExternalDisplaysRequireDgpuSync() == "true";
                 let graphics: string = this.bus.GetGraphicsSync();
 
-                this.power_menu.addMenuItem(this.graphics_separator);
-
+                // Create Quick Settings menu toggle for graphics
+                this.graphics_toggle = new GraphicsQuickMenuToggle();
+                
                 let compute_text: string | null = null,
                     hybrid_text: string | null = null,
                     integrated_text: string | null = null,
@@ -272,6 +230,14 @@ export class Ext {
                 };
 
                 this.set_graphics_profile_ornament(this.graphics_profiles, graphics);
+                
+                // Update the toggle subtitle with current profile
+                let profileName = graphics.charAt(0).toUpperCase() + graphics.slice(1);
+                this.graphics_toggle.setActiveProfile(profileName);
+
+                // Add to Quick Settings
+                this.quickSettingsMenu = Main.panel.statusArea.quickSettings;
+                this.quickSettingsMenu.addExternalIndicator(this.graphics_toggle);
 
                 this.bus.connectSignal("HotPlugDetect", (proxy: any, _nameOwner: any, args: any) => {
                     if (this.graphics_profiles) {
@@ -302,31 +268,21 @@ export class Ext {
         } catch (error) {
             log("failed to detect graphics switching: " + error);
         }
-
-        this.power_menu.addMenuItem(this.profile_separator);
-
-        this.battery = this.attach_power_profile(_("Battery Life"), this.bus.BatteryRemote);
-        this.balanced = this.attach_power_profile(_("Balanced"), this.bus.BalancedRemote);
-        this.performance = this.attach_power_profile(_("High Performance"), this.bus.PerformanceRemote);
-
-        this.set_power_profile_ornament(this.bus.GetProfileSync());
-        this.bus.connectSignal("PowerProfileSwitch", (_proxy: any, _sender: any, [profile]: string[]) => {
-            this.set_power_profile_ornament(profile);
-        });
     }
 
     destroy() {
-        this.battery.destroy();
-        this.balanced.destroy();
-        this.performance.destroy();
-
         if (this.graphics_profiles) {
             this.graphics_profiles.compute.destroy();
             this.graphics_profiles.hybrid.destroy();
             this.graphics_profiles.integrated.destroy();
             this.graphics_profiles.nvidia.destroy();
         }
-        this.panel_indicator.destroy();
+
+        if (this.graphics_toggle) {
+            this.quickSettingsMenu._indicators.remove_child(this.graphics_toggle);
+            this.quickSettingsMenu.menu._grid.remove_child(this.graphics_toggle);
+            this.graphics_toggle.destroy();
+        }
     }
 
     attach_graphics_profile(name: string, text: string | null, profile: string) {
@@ -335,19 +291,7 @@ export class Ext {
         obj.connect('activate', (item: any) => {
             this.graphics_activate(item, name, profile);
         });
-        this.power_menu.addMenuItem(obj);
-        return obj;
-    }
-
-    attach_power_profile(name: string, dbus_method: any): any {
-        let obj = new PopupMenu.PopupMenuItem(name);
-        obj.connect('activate', (item: any) => {
-            this.reset_profile_ornament();
-            dbus_method.call(this.bus, () => {
-                item.setOrnament(Ornament.CHECK);
-            });
-        });
-        this.power_menu.addMenuItem(obj);
+        this.graphics_toggle.menu.addMenuItem(obj);
         return obj;
     }
 
@@ -366,23 +310,6 @@ export class Ext {
         }
 
         obj.setOrnament(Ornament.CHECK);
-    }
-
-    set_power_profile_ornament(active_profile: string) {
-        this.reset_profile_ornament();
-
-        let obj = null;
-        if (active_profile == "Battery") {
-            obj = this.battery;
-        } else if (active_profile == "Balanced") {
-            obj = this.balanced;
-        } else if (active_profile == "Performance") {
-            obj = this.performance;
-        }
-
-        if (obj) obj.setOrnament(Ornament.CHECK);
-
-        log("power profile was set: '" + active_profile + "'");
     }
 
     /** Display dialog on hotplug event. */
@@ -525,12 +452,6 @@ export class Ext {
         graphics_profiles.hybrid.setOrnament(Ornament.NONE);
         graphics_profiles.integrated.setOrnament(Ornament.NONE);
         graphics_profiles.nvidia.setOrnament(Ornament.NONE);
-    }
-
-    reset_profile_ornament() {
-        this.performance.setOrnament(Ornament.NONE);
-        this.balanced.setOrnament(Ornament.NONE);
-        this.battery.setOrnament(Ornament.NONE);
     }
 }
 
