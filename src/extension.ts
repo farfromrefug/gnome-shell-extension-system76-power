@@ -279,8 +279,10 @@ export class Ext {
         }
 
         if (this.graphics_toggle) {
-            this.quickSettingsMenu._indicators.remove_child(this.graphics_toggle);
-            this.quickSettingsMenu.menu._grid.remove_child(this.graphics_toggle);
+            // Remove from indicators in the panel
+            if (this.graphics_toggle.get_parent())
+                this.graphics_toggle.get_parent().remove_child(this.graphics_toggle);
+            
             this.graphics_toggle.destroy();
         }
     }
