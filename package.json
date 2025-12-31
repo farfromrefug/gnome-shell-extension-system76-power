@@ -1,0 +1,6 @@
+{
+    "name": "gnome-shell-extension-system76-power",
+    "devDependencies": {
+        "typescript": "^5.9.3"
+    }
+}

@@ -8,3 +8,5 @@ _build
 *.zip
 debian/*
 target
+node_modules
+.yarn
