@@ -13,12 +13,12 @@ import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import { Ornament } from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 const ByteArray = imports.byteArray;
-const Lang = imports.lang;
 const Config = imports.misc.config;
 
-// Detect GNOME Shell version
-const shellVersion = parseFloat(Config.PACKAGE_VERSION);
-const useQuickSettings = shellVersion >= 45;
+// Detect GNOME Shell version - parse major version only
+const shellVersionParts = Config.PACKAGE_VERSION.split('.');
+const shellMajorVersion = parseInt(shellVersionParts[0], 10);
+const useQuickSettings = shellMajorVersion >= 45;
 
 // Conditionally import QuickSettings for GNOME 45+
 let QuickSettings: any = null;
@@ -29,6 +29,9 @@ if (useQuickSettings) {
         log("QuickSettings not available, falling back to PanelIndicator");
     }
 }
+
+// Determine if we can actually use Quick Settings (both version check and import succeeded)
+const canUseQuickSettings = useQuickSettings && QuickSettings !== null;
 
 const PowerDaemon = Gio.DBusProxy.makeProxyWrapper(
 '<node>\
@@ -189,13 +192,12 @@ var PanelIndicator = GObject.registerClass(
         // add indicator to panel icon
         this.add_child(this._indicatorLayout);
 
-        this.menu.connect('open-state-changed', Lang.bind(this._indicatorLayout, (_: any, open: boolean) => {
+        this.menu.connect('open-state-changed', (_: any, open: boolean) => {
             if (open)
                 this._indicatorLayout.add_style_pseudo_class('active');
             else
                 this._indicatorLayout.remove_style_pseudo_class('active');
-
-        }));
+        });
 
         Main.panel.addToStatusArea('s76-power.panel', this);
       }
@@ -204,7 +206,7 @@ var PanelIndicator = GObject.registerClass(
 
 // Quick Settings toggle for GNOME 45+
 var GraphicsQuickMenuToggle: any = null;
-if (useQuickSettings && QuickSettings) {
+if (canUseQuickSettings) {
     GraphicsQuickMenuToggle = GObject.registerClass(
         class GraphicsQuickMenuToggle extends QuickSettings.QuickMenuToggle {
             _init() {
@@ -250,7 +252,7 @@ export class Ext {
                 let graphics: string = this.bus.GetGraphicsSync();
 
                 // Create UI based on GNOME Shell version
-                if (useQuickSettings && GraphicsQuickMenuToggle) {
+                if (canUseQuickSettings) {
                     // GNOME 45+: Use Quick Settings
                     this.graphics_toggle = new GraphicsQuickMenuToggle();
                 } else {
@@ -312,7 +314,7 @@ export class Ext {
                 this.set_graphics_profile_ornament(this.graphics_profiles, graphics);
                 
                 // For GNOME 45+, update the toggle subtitle and add to Quick Settings
-                if (useQuickSettings && this.graphics_toggle) {
+                if (canUseQuickSettings && this.graphics_toggle) {
                     let profileName = graphics.charAt(0).toUpperCase() + graphics.slice(1);
                     this.graphics_toggle.setActiveProfile(profileName);
                     
@@ -385,7 +387,7 @@ export class Ext {
         });
         
         // Add to appropriate menu based on GNOME version
-        if (useQuickSettings && this.graphics_toggle) {
+        if (canUseQuickSettings && this.graphics_toggle) {
             this.graphics_toggle.menu.addMenuItem(obj);
         } else if (this.power_menu) {
             this.power_menu.addMenuItem(obj);
