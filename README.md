@@ -2,10 +2,10 @@
 
 **[gnome-shell-extension-system76-power](https://github.com/pop-os/gnome-shell-extension-system76-power)** is a GNOME Shell extension that adds graphical integration with the [system76-power](https://github.com/pop-os/system76-power) daemon, including:
 
-- Power profiles (and graphics-switching profiles on applicable systems) in a menu in the top panel
+- Graphics-switching profiles (on applicable systems) integrated into the GNOME Quick Settings panel
 - Prompting to switch graphics modes when necessary to use a hot-plugged display
 
-_This is a fork that supports Gnome v43+ and uses its own panel icon instead of integrating it to the battery menu._
+_This is a fork that supports Gnome v45+ and integrates graphics switching into the Quick Settings panel (Control Center) instead of using a separate panel icon._
 
 ### Requirements
 - `git` (or `unzip`) and Typescript (`tsc`)
