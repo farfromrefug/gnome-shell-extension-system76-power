@@ -284,8 +284,6 @@ export class Ext {
             if (this.bus.GetSwitchableSync() == "true") {
                 let ext_requires_nvidia: boolean = this.bus.GetExternalDisplaysRequireDgpuSync() == "true";
                 let graphics: string = this.bus.GetGraphicsSync();
-                log("graphics: " + graphics)
-                log("canUseQuickSettings: " + canUseQuickSettings)
 
 
                 // Create UI based on GNOME Shell version
